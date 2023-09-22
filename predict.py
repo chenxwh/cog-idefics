@@ -13,7 +13,7 @@ class Predictor(BasePredictor):
         """Load the model into memory to make running multiple predictions efficient"""
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        checkpoint = "HuggingFaceM4/idefics-9b"
+        checkpoint = "HuggingFaceM4/idefics-9b-instruct"
         self.model = IdeficsForVisionText2Text.from_pretrained(
             checkpoint, cache_dir="model_cache", torch_dtype=torch.bfloat16
         ).to(self.device)
@@ -31,7 +31,7 @@ class Predictor(BasePredictor):
         ),
         repetition_penalty: float = Input(
             description="Repetition penalty, 1.0 is equivalent to no penalty",
-            default=2.0,
+            default=1.0,
             ge=0.01,
             le=5,
         ),
@@ -57,13 +57,10 @@ class Predictor(BasePredictor):
         ),
     ) -> str:
         """Run a single prediction on the model"""
-        prompt = [Image.open(str(image)), text]
-        inputs = self.processor(prompt, return_tensors="pt").to(self.device)
 
         generation_args = {
             "max_new_tokens": max_new_tokens,
             "repetition_penalty": repetition_penalty,
-            # "stop_sequences": ["<end_of_utterance>", "\nUser:"],
             "do_sample": False,
         }
 
@@ -72,7 +69,21 @@ class Predictor(BasePredictor):
             generation_args["do_sample"] = True
             generation_args["top_p"] = top_p
 
-        # Generation args
+        prompt = [
+            [
+                f"User: {text}",
+                Image.open(str(image)),
+                "<end_of_utterance>",
+                "\nAssistant:",
+            ],
+        ]
+
+        inputs = self.processor(
+            prompt, add_end_of_utterance_token=False, return_tensors="pt"
+        ).to(self.device)
+        exit_condition = self.processor.tokenizer(
+            "<end_of_utterance>", add_special_tokens=False
+        ).input_ids
         bad_words_ids = self.processor.tokenizer(
             ["<image>", "<fake_token_around_image>"], add_special_tokens=False
         ).input_ids
@@ -80,12 +91,14 @@ class Predictor(BasePredictor):
         generated_ids = self.model.generate(
             **inputs,
             **generation_args,
+            eos_token_id=exit_condition,
             bad_words_ids=bad_words_ids,
         )
         generated_text = self.processor.batch_decode(
             generated_ids, skip_special_tokens=True
         )
+
         out_text = generated_text[0]
-        if out_text.startswith(text):
-            out_text = out_text[len(text) :].strip()
+        if out_text.startswith(f"User: {text} \nAssistant: "):
+            out_text = out_text[len(f"User: {text} \nAssistant: ") :].strip()
         return out_text
